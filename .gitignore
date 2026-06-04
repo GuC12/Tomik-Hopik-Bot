@@ -21,3 +21,7 @@
 *.apk
 *.aab
 *.app
+
+.env
+data/*.json
+!data/.gitkeep
