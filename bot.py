@@ -190,6 +190,16 @@ def user_id(update: Update) -> str:
     return str(update.effective_user.id)
 
 
+def chat_id(update: Update) -> int:
+    if update.effective_chat is None:
+        raise ValueError("Нет чата в Telegram update.")
+    return update.effective_chat.id
+
+
+def is_group_chat(update: Update) -> bool:
+    return update.effective_chat is not None and update.effective_chat.type in {"group", "supergroup"}
+
+
 def display_name(update: Update) -> str:
     user = update.effective_user
     if user is None:
@@ -342,9 +352,12 @@ def generate_room_code() -> str:
             return code
 
 
-def active_rooms_text() -> str:
+def active_rooms_text(target_chat_id: int | None = None) -> str:
     active_rooms = [
-        room for room in ROOMS.values() if room["status"] == "waiting"
+        room
+        for room in ROOMS.values()
+        if room["status"] == "waiting"
+        and (target_chat_id is None or room.get("chat_id") == target_chat_id)
     ]
     if not active_rooms:
         return "Сейчас нет комнат в ожидании игроков."
@@ -362,6 +375,29 @@ def active_rooms_text() -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = get_player(user_id(update), display_name(update))
+    if is_group_chat(update):
+        text = (
+            "Бот подключён к группе.\n\n"
+            "Здесь можно играть на виртуальные Томики 🟦 и Хопики 🟨 прямо командами группы.\n"
+            "Комнаты с друзьями:\n"
+            "/create_room кубик 3 tomiki 100\n"
+            "/join_room AB123\n"
+            "/rooms\n\n"
+            "Одиночные ставки:\n"
+            "/dice 6 tomiki 100\n"
+            "/slots hopiki 50\n"
+            "/roulette красное tomiki 100\n\n"
+            "События:\n"
+            "/events\n"
+            "/bet_event 1 2 tomiki 100\n\n"
+            "Важно: это только виртуальная валюта, без реальных денег."
+        )
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=main_menu(is_admin(player["id"])),
+        )
+        return
+
     text = (
         f"Привет, {player['name']}!\n\n"
         "Это бот с виртуальными Томиками 🟦 и Хопиками 🟨.\n"
@@ -371,6 +407,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text,
         reply_markup=main_menu(is_admin(player["id"])),
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    get_player(user_id(update), display_name(update))
+    text = (
+        "Команды бота:\n\n"
+        "Баланс и история:\n"
+        "/balance\n"
+        "/bet_history\n\n"
+        "Играть одному:\n"
+        "/dice 6 tomiki 100\n"
+        "/dice больше hopiki 50\n"
+        "/slots tomiki 100\n"
+        "/roulette красное tomiki 100\n\n"
+        "Игры с друзьями в группе:\n"
+        "/create_room кубик 3 tomiki 100\n"
+        "/create_room слоты 2 hopiki 50\n"
+        "/create_room рулетка 4 tomiki 100 красное\n"
+        "/join_room AB123\n"
+        "/rooms\n"
+        "/leave_room\n\n"
+        "События:\n"
+        "/events\n"
+        "/event 1\n"
+        "/bet_event 1 2 tomiki 100\n\n"
+        "Админ-команды работают только для ID из ADMIN_IDS."
+    )
+    if is_group_chat(update):
+        text += "\n\nЕсли бот не реагирует в группе, у @BotFather отключи Privacy Mode для этого бота."
+    await update.effective_message.reply_text(text)
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -685,6 +751,8 @@ async def create_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "status": "waiting",
         "players": [player_id],
         "creator": player_id,
+        "chat_id": chat_id(update),
+        "chat_type": update.effective_chat.type if update.effective_chat else "private",
         "choices": {},
         "results": {},
         "created_at": now_iso(),
@@ -771,7 +839,10 @@ async def join_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def rooms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(active_rooms_text(), parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(
+        active_rooms_text(chat_id(update)),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def leave_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -980,6 +1051,8 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "options": parts[1:],
         "status": "open",
         "created_by": player_id,
+        "chat_id": chat_id(update),
+        "chat_type": update.effective_chat.type if update.effective_chat else "private",
         "currency": "any",
         "minimum_bet": 10,
         "maximum_bet": 5000,
@@ -1093,6 +1166,7 @@ async def finish_event(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     save_events()
 
     await notify_event_players(context, event, winner_option)
+    await notify_event_chat(context, event, winner_option)
     await update.effective_message.reply_text(payout_summary)
 
 
@@ -1199,6 +1273,30 @@ async def notify_event_players(
             )
         except TelegramError:
             continue
+
+
+async def notify_event_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    event: dict[str, Any],
+    winner_option: int,
+) -> None:
+    target_chat_id = event.get("chat_id")
+    if not target_chat_id or event.get("chat_type") not in {"group", "supergroup"}:
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_chat_id),
+            text=(
+                "📢 Событие завершено!\n"
+                f"Событие: {event['title']}\n"
+                f"Победил вариант: {event['options'][winner_option]}\n"
+                f"Всего ставок: {len(event['bets'])}\n"
+                "Личные результаты записаны в историю ставок игроков."
+            ),
+        )
+    except TelegramError:
+        return
 
 
 async def events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1494,7 +1592,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=rooms_keyboard(),
         )
     elif data == "room_list":
-        await query.edit_message_text(active_rooms_text(), parse_mode=ParseMode.HTML, reply_markup=rooms_keyboard())
+        target_chat_id = query.message.chat_id if query.message else None
+        await query.edit_message_text(
+            active_rooms_text(target_chat_id),
+            parse_mode=ParseMode.HTML,
+            reply_markup=rooms_keyboard(),
+        )
     elif data == "event_list":
         open_events = [event for event in EVENTS.values() if event["status"] == "open"]
         if not open_events:
@@ -1549,6 +1652,7 @@ def build_application() -> Application:
 
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("solo_game", solo_game))
     application.add_handler(CommandHandler("dice", solo_dice))
