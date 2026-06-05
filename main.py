@@ -23,6 +23,8 @@ DATA_DIR = Path("data")
 PLAYERS_FILE = DATA_DIR / "players.json"
 ROOMS_FILE = DATA_DIR / "rooms.json"
 EVENTS_FILE = DATA_DIR / "events.json"
+SHOP_FILE = DATA_DIR / "shop_items.json"
+ADMIN_CONTROLS_FILE = DATA_DIR / "admin_controls.json"
 
 TOMIKI = "tomiki"
 HOPIKI = "hopiki"
@@ -34,6 +36,7 @@ DEFAULT_HOPIKI_BALANCE = 1000
 ROOMS: dict[str, dict[str, Any]] = {}
 EVENTS: dict[str, dict[str, Any]] = {}
 PLAYERS: dict[str, dict[str, Any]] = {}
+ADMIN_CONTROLS: dict[str, dict[str, Any]] = {}
 
 ROOM_SETTINGS: dict[str, Any] = {
     "return_if_no_winner": True,
@@ -210,6 +213,10 @@ def setup_files() -> None:
                 "event_settings": EVENT_SETTINGS,
             },
         )
+    if not SHOP_FILE.exists():
+        save_json(SHOP_FILE, SHOP_ITEMS)
+    if not ADMIN_CONTROLS_FILE.exists():
+        save_json(ADMIN_CONTROLS_FILE, {})
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -227,7 +234,7 @@ def save_json(path: Path, data: Any) -> None:
 
 
 def load_data() -> None:
-    global PLAYERS, ROOMS, EVENTS, ROOM_SETTINGS, EVENT_SETTINGS
+    global PLAYERS, ROOMS, EVENTS, ROOM_SETTINGS, EVENT_SETTINGS, SHOP_ITEMS, ADMIN_CONTROLS
 
     setup_files()
     PLAYERS = load_json(PLAYERS_FILE, {})
@@ -239,6 +246,9 @@ def load_data() -> None:
     events_data = load_json(EVENTS_FILE, {})
     EVENTS = events_data.get("events", {})
     EVENT_SETTINGS = events_data.get("event_settings", EVENT_SETTINGS)
+
+    SHOP_ITEMS = load_json(SHOP_FILE, SHOP_ITEMS)
+    ADMIN_CONTROLS = load_json(ADMIN_CONTROLS_FILE, {})
 
 
 def save_players() -> None:
@@ -263,6 +273,14 @@ def save_events() -> None:
             "event_settings": EVENT_SETTINGS,
         },
     )
+
+
+def save_shop_items() -> None:
+    save_json(SHOP_FILE, SHOP_ITEMS)
+
+
+def save_admin_controls() -> None:
+    save_json(ADMIN_CONTROLS_FILE, ADMIN_CONTROLS)
 
 
 def user_id(update: Update) -> str:
@@ -343,6 +361,39 @@ def is_admin(player_id: str) -> bool:
 
 def require_admin(update: Update) -> bool:
     return is_admin(user_id(update))
+
+
+def require_admin_private(update: Update) -> bool:
+    return require_admin(update) and not is_group_chat(update)
+
+
+def require_admin_group(update: Update) -> bool:
+    return require_admin(update) and is_group_chat(update)
+
+
+async def hide_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_group_chat(update) or update.effective_message is None:
+        return
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
+    except TelegramError:
+        return
+
+
+async def send_admin_private(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    if update.effective_user is None:
+        return
+    try:
+        await context.bot.send_message(chat_id=update.effective_user.id, text=text)
+    except TelegramError:
+        return
 
 
 def can_pay(player: dict[str, Any], currency: str, amount: int) -> bool:
@@ -508,7 +559,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Магазин безделушек:\n"
         "/shop\n"
         "/buy_item 1\n"
-        "/inventory\n\n"
+        "/inventory\n"
+        "/trade_item user_id 1\n\n"
+        "ID:\n"
+        "/my_id\n"
+        "/group_id\n\n"
         "Играть одному:\n"
         "/dice 6 tomiki 100\n"
         "/dice больше hopiki 50\n"
@@ -660,7 +715,14 @@ async def play_solo_game(
         return
 
     player[currency] -= amount
-    title, result, payout, lines = calculate_solo_game(game, amount, roulette_choice, dice_bet)
+    forced_result = pop_forced_solo_result(chat_id(update), player_id, game)
+    title, result, payout, lines = calculate_solo_game(
+        game,
+        amount,
+        roulette_choice,
+        dice_bet,
+        forced_result,
+    )
     if payout > 0:
         player[currency] += payout
 
@@ -687,14 +749,20 @@ def calculate_solo_game(
     amount: int,
     roulette_choice: str | None,
     dice_bet: str | int | None,
+    forced_result: str | None = None,
 ) -> tuple[str, str, int, list[str]]:
     if game == "dice":
-        roll = random.randint(1, 6)
         assert dice_bet is not None
+        roll = forced_dice_roll(dice_bet, forced_result)
         won = is_dice_bet_winner(roll, dice_bet)
-        multiplier = dice_bet_multiplier(dice_bet) if won else 0
-        payout = amount * multiplier
-        result = "выигрыш" if won else "поражение"
+        if forced_result == "return":
+            multiplier = 1
+            payout = amount
+            result = "возврат"
+        else:
+            multiplier = dice_bet_multiplier(dice_bet) if won else 0
+            payout = amount * multiplier
+            result = "выигрыш" if won else "поражение"
         lines = [
             "🎲 Ставка на кубик",
             f"Твой выбор: {dice_bet_title(dice_bet)}",
@@ -704,11 +772,16 @@ def calculate_solo_game(
         return "Кубик одному", result, payout, lines
 
     if game == "slots":
-        symbols = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+        symbols = forced_slots_symbols(forced_result)
         score = slot_score(symbols)
         multiplier = solo_slots_multiplier(symbols, score)
-        payout = amount * multiplier
-        result = "выигрыш" if payout > 0 else "поражение"
+        if forced_result == "return":
+            payout = amount
+            result = "возврат"
+            multiplier = 1
+        else:
+            payout = amount * multiplier
+            result = "выигрыш" if payout > 0 else "поражение"
         lines = [
             "🎰 Игра одному: Слоты",
             f"Выпало: {' '.join(symbols)}",
@@ -717,12 +790,16 @@ def calculate_solo_game(
         ]
         return "Слоты одному", result, payout, lines
 
-    roulette_result = random.choice(["red", "black", "zero"])
     assert roulette_choice is not None
+    roulette_result = forced_roulette_result(roulette_choice, forced_result)
     if roulette_choice == roulette_result:
         multiplier = 14 if roulette_choice == "zero" else 2
         payout = amount * multiplier
         result = "выигрыш"
+    elif forced_result == "return":
+        multiplier = 1
+        payout = amount
+        result = "возврат"
     else:
         multiplier = 0
         payout = 0
@@ -773,6 +850,51 @@ def dice_bet_title(dice_bet: str | int) -> str:
     if isinstance(dice_bet, int):
         return str(dice_bet)
     return DICE_BET_TITLES[dice_bet]
+
+
+def pop_forced_solo_result(target_chat_id: int, player_id: str, game: str) -> str | None:
+    chat_controls = ADMIN_CONTROLS.get(str(target_chat_id), {})
+    forced_solo = chat_controls.get("forced_solo", {})
+    key = f"{player_id}:{game}"
+    data = forced_solo.pop(key, None)
+    if data is None:
+        return None
+    save_admin_controls()
+    return data.get("result")
+
+
+def forced_dice_roll(dice_bet: str | int, forced_result: str | None) -> int:
+    if forced_result == "win":
+        if isinstance(dice_bet, int):
+            return dice_bet
+        if dice_bet == "high":
+            return random.choice([4, 5, 6])
+        if dice_bet == "low":
+            return random.choice([1, 2, 3])
+        if dice_bet == "even":
+            return random.choice([2, 4, 6])
+        if dice_bet == "odd":
+            return random.choice([1, 3, 5])
+    if forced_result == "lose":
+        possible_rolls = [roll for roll in range(1, 7) if not is_dice_bet_winner(roll, dice_bet)]
+        return random.choice(possible_rolls)
+    return random.randint(1, 6)
+
+
+def forced_slots_symbols(forced_result: str | None) -> list[str]:
+    if forced_result == "win":
+        return ["7", "7", "7"]
+    if forced_result == "lose":
+        return ["🍒", "🍋", "🔔"]
+    return [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+
+
+def forced_roulette_result(roulette_choice: str, forced_result: str | None) -> str:
+    if forced_result == "win":
+        return roulette_choice
+    if forced_result == "lose":
+        return random.choice([choice for choice in ["red", "black", "zero"] if choice != roulette_choice])
+    return random.choice(["red", "black", "zero"])
 
 
 async def create_room(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1621,6 +1743,245 @@ async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def create_shop_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not require_admin_private(update):
+        await update.effective_message.reply_text("Эта админ-команда работает только в личке с ботом.")
+        return
+
+    raw_text = update.effective_message.text or ""
+    payload = raw_text.replace("/create_shop_item", "", 1).strip()
+    parts = [part.strip() for part in payload.split("|")]
+    if len(parts) != 6 or any(not part for part in parts):
+        await send_admin_private(
+            update,
+            context,
+            "Формат:\n/create_shop_item emoji | name | description | rarity | tomiki | price",
+        )
+        return
+
+    emoji, name, description, rarity, currency_raw, price_raw = parts
+    currency = parse_currency(currency_raw)
+    try:
+        price = int(price_raw)
+    except ValueError:
+        await send_admin_private(update, context, "Цена должна быть числом.")
+        return
+
+    if currency is None:
+        await send_admin_private(update, context, "Валюта должна быть tomiki или hopiki.")
+        return
+    if price <= 0:
+        await send_admin_private(update, context, "Цена должна быть больше нуля.")
+        return
+
+    item_id = next_shop_item_id()
+    SHOP_ITEMS[item_id] = {
+        "emoji": emoji,
+        "name": name,
+        "description": description,
+        "rarity": rarity,
+        "currency": currency,
+        "price": price,
+        "created_by": user_id(update),
+        "created_at": now_iso(),
+    }
+    save_shop_items()
+
+    await send_admin_private(
+        update,
+        context,
+        f"Предмет создан.\nID: {item_id}\n{name}\nЦена: {price} {currency_title(currency)}",
+    )
+
+
+def next_shop_item_id() -> str:
+    numeric_ids = [int(item_id) for item_id in SHOP_ITEMS.keys() if item_id.isdigit()]
+    return str(max(numeric_ids + [0]) + 1)
+
+
+async def delete_shop_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not require_admin_private(update):
+        await update.effective_message.reply_text("Эта админ-команда работает только в личке с ботом.")
+        return
+
+    if not context.args:
+        await send_admin_private(update, context, "Формат: /delete_shop_item item_id")
+        return
+
+    item_id = context.args[0]
+    item = SHOP_ITEMS.pop(item_id, None)
+    if item is None:
+        await send_admin_private(update, context, "Такого предмета нет.")
+        return
+
+    save_shop_items()
+    await send_admin_private(update, context, f"Предмет удалён: {item.get('name', item_id)}")
+
+
+async def trade_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sender_id = user_id(update)
+    sender = get_player(sender_id, display_name(update))
+    if len(context.args) < 2:
+        await update.effective_message.reply_text(
+            "Формат: /trade_item user_id номер_предмета\n"
+            "Номер предмета смотри в /inventory"
+        )
+        return
+
+    target_id = context.args[0]
+    try:
+        item_number = int(context.args[1])
+    except ValueError:
+        await update.effective_message.reply_text("Номер предмета должен быть числом.")
+        return
+
+    sender_items = sender.get("items", [])
+    if item_number < 1 or item_number > len(sender_items):
+        await update.effective_message.reply_text("У тебя нет предмета с таким номером.")
+        return
+
+    target = get_player(target_id, f"Игрок {target_id}")
+    item = sender_items.pop(item_number - 1)
+    if isinstance(item, dict):
+        item["traded_at"] = now_iso()
+        item["traded_from"] = sender_id
+    target.setdefault("items", []).append(item)
+    save_players()
+
+    item_name = item.get("name", "Предмет") if isinstance(item, dict) else str(item)
+    await update.effective_message.reply_text(
+        f"Предмет передан игроку {target_id}: {item_name}"
+    )
+
+
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    player = get_player(user_id(update), display_name(update))
+    await update.effective_message.reply_text(
+        f"Твой Telegram ID: {player['id']}\n"
+        "Он нужен для трейдов и админских команд."
+    )
+
+
+async def group_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        f"ID этого чата: {chat_id(update)}\n"
+        "Он нужен админу для личных админ-команд."
+    )
+
+
+async def force_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not require_admin_private(update):
+        await update.effective_message.reply_text("Эта админ-команда работает только в личке с ботом.")
+        return
+    if len(context.args) < 4:
+        await update.effective_message.reply_text(
+            "Формат:\n"
+            "/force_result group_id user_id game win\n\n"
+            "game: dice, slots, roulette\n"
+            "result: win, lose, return"
+        )
+        return
+
+    target_group_id = context.args[0]
+    target_user_id = context.args[1]
+    game = parse_game(context.args[2])
+    result = context.args[3].lower()
+
+    if game is None:
+        await update.effective_message.reply_text("Игра должна быть: dice, slots или roulette.")
+        return
+    if result not in {"win", "lose", "return"}:
+        await update.effective_message.reply_text("Результат должен быть: win, lose или return.")
+        return
+
+    chat_controls = ADMIN_CONTROLS.setdefault(str(target_group_id), {})
+    forced_solo = chat_controls.setdefault("forced_solo", {})
+    forced_solo[f"{target_user_id}:{game}"] = {
+        "result": result,
+        "created_by": user_id(update),
+        "created_at": now_iso(),
+    }
+    save_admin_controls()
+
+    await update.effective_message.reply_text(
+        "Следующий результат настроен.\n"
+        f"Группа: {target_group_id}\n"
+        f"Игрок: {target_user_id}\n"
+        f"Игра: {game}\n"
+        f"Результат: {result}\n\n"
+        "Настройка одноразовая и исчезнет после следующей одиночной игры этого игрока в группе."
+    )
+
+
+async def admin_set_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not require_admin_private(update):
+        await update.effective_message.reply_text("Эта админ-команда работает только в личке с ботом.")
+        return
+
+    if len(context.args) < 3:
+        await send_admin_private(update, context, "Формат: /admin_set_balance user_id tomiki 1000")
+        return
+
+    target_id = context.args[0]
+    currency = parse_currency(context.args[1])
+    try:
+        amount = int(context.args[2])
+    except ValueError:
+        await send_admin_private(update, context, "Сумма должна быть числом.")
+        return
+
+    if currency is None:
+        await send_admin_private(update, context, "Валюта должна быть tomiki или hopiki.")
+        return
+    if amount < 0:
+        await send_admin_private(update, context, "Баланс не может быть меньше нуля.")
+        return
+
+    target = get_player(target_id, f"Игрок {target_id}")
+    target[currency] = amount
+    save_players()
+    await send_admin_private(
+        update,
+        context,
+        f"Баланс игрока {target_id} установлен: {amount} {currency_title(currency)}",
+    )
+
+
+async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not require_admin_private(update):
+        await update.effective_message.reply_text("Эта админ-команда работает только в личке с ботом.")
+        return
+
+    if len(context.args) < 3:
+        await send_admin_private(update, context, "Формат: /admin_take user_id tomiki 100")
+        return
+
+    target_id = context.args[0]
+    currency = parse_currency(context.args[1])
+    try:
+        amount = int(context.args[2])
+    except ValueError:
+        await send_admin_private(update, context, "Сумма должна быть числом.")
+        return
+
+    if currency is None:
+        await send_admin_private(update, context, "Валюта должна быть tomiki или hopiki.")
+        return
+    if amount <= 0:
+        await send_admin_private(update, context, "Сумма должна быть больше нуля.")
+        return
+
+    target = get_player(target_id, f"Игрок {target_id}")
+    target[currency] = max(0, target.get(currency, 0) - amount)
+    save_players()
+    await send_admin_private(
+        update,
+        context,
+        f"Списано у игрока {target_id}: {amount} {currency_title(currency)}\n"
+        f"Новый баланс: {target[currency]} {currency_title(currency)}",
+    )
+
+
 async def give_tomiki(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await give_currency(update, context, TOMIKI)
 
@@ -1707,6 +2068,12 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text in {"инвентарь", "мои предметы", "inventory"}:
         await inventory(update, context)
         return
+    if text in {"мой id", "мой айди", "айди", "id"}:
+        await my_id(update, context)
+        return
+    if text in {"id группы", "айди группы", "group id"}:
+        await group_id(update, context)
+        return
     if text in {"комнаты", "rooms"}:
         await rooms(update, context)
         return
@@ -1728,6 +2095,9 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if command in {"купить", "buy"}:
         await handle_group_buy_text(update, context, parts)
+        return
+    if command in {"трейд", "trade", "передать"}:
+        await handle_group_trade_text(update, context, parts)
 
 
 async def handle_group_dice_text(update: Update, parts: list[str]) -> None:
@@ -1781,6 +2151,18 @@ async def handle_group_buy_text(
         return
     context.args = [parts[1]]
     await buy_item(update, context)
+
+
+async def handle_group_trade_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    parts: list[str],
+) -> None:
+    if len(parts) != 3:
+        await update.effective_message.reply_text("Формат: трейд user_id 1")
+        return
+    context.args = [parts[1], parts[2]]
+    await trade_item(update, context)
 
 
 def stats_text() -> str:
@@ -1954,6 +2336,14 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("shop", shop))
     application.add_handler(CommandHandler("buy_item", buy_item))
     application.add_handler(CommandHandler("inventory", inventory))
+    application.add_handler(CommandHandler("trade_item", trade_item))
+    application.add_handler(CommandHandler("my_id", my_id))
+    application.add_handler(CommandHandler("group_id", group_id))
+    application.add_handler(CommandHandler("create_shop_item", create_shop_item))
+    application.add_handler(CommandHandler("delete_shop_item", delete_shop_item))
+    application.add_handler(CommandHandler("admin_set_balance", admin_set_balance))
+    application.add_handler(CommandHandler("admin_take", admin_take))
+    application.add_handler(CommandHandler("force_result", force_result))
     application.add_handler(CommandHandler("give_tomiki", give_tomiki))
     application.add_handler(CommandHandler("give_hopiki", give_hopiki))
     application.add_handler(CommandHandler("give_item", give_item))

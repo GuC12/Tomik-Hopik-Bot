@@ -51,6 +51,9 @@ python main.py
 - `/shop` — магазин безделушек.
 - `/buy_item item_id` — купить предмет.
 - `/inventory` — посмотреть свои предметы.
+- `/trade_item user_id item_number` — передать предмет другому игроку.
+- `/my_id` — узнать свой Telegram ID.
+- `/group_id` — узнать ID группы.
 - `/solo_game игра валюта ставка [выбор]` — сыграть одному.
 - `/dice выбор валюта ставка` — ставка на кубик.
 - `/slots валюта ставка` — слоты одному.
@@ -128,6 +131,9 @@ python main.py
 магазин
 купить 1
 инвентарь
+трейд user_id 1
+мой id
+id группы
 комнаты
 события
 кубик 6 tomiki 100
@@ -161,6 +167,28 @@ Bot Settings -> Group Privacy -> Turn off
 - `/give_hopiki user_id amount`
 - `/give_item user_id название_предмета`
 - `/admin_stats`
+- `/create_shop_item emoji | name | description | rarity | tomiki | price`
+- `/delete_shop_item item_id`
+- `/admin_set_balance user_id tomiki amount`
+- `/admin_take user_id hopiki amount`
+- `/force_result group_id user_id dice win`
+
+Админ-команды для магазина, баланса и `force_result` работают в личке с ботом. Так другие игроки в группе не видят, что админ использует панель.
+
+Для `force_result`:
+
+```text
+game: dice, slots, roulette
+result: win, lose, return
+```
+
+Пример:
+
+```text
+/force_result -1001234567890 123456789 dice win
+```
+
+Настройка одноразовая: сработает на следующей одиночной игре этого игрока в указанной группе и удалится.
 
 ## Как добавить свои безделушки
 
