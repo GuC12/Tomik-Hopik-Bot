@@ -14,6 +14,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 
@@ -26,6 +28,8 @@ TOMIKI = "tomiki"
 HOPIKI = "hopiki"
 TOMIKI_NAME = "Томики 🟦"
 HOPIKI_NAME = "Хопики 🟨"
+DEFAULT_TOMIKI_BALANCE = 1000
+DEFAULT_HOPIKI_BALANCE = 1000
 
 ROOMS: dict[str, dict[str, Any]] = {}
 EVENTS: dict[str, dict[str, Any]] = {}
@@ -102,6 +106,33 @@ DICE_BET_TITLES = {
     "low": "меньше 4",
     "even": "чёт",
     "odd": "нечёт",
+}
+
+SHOP_ITEMS: dict[str, dict[str, Any]] = {
+    "1": {
+        "name": "Блестящий камушек",
+        "description": "Просто красивый сувенир для профиля.",
+        "currency": TOMIKI,
+        "price": 100,
+    },
+    "2": {
+        "name": "Мини-корона",
+        "description": "Безделушка для тех, кто любит побеждать красиво.",
+        "currency": TOMIKI,
+        "price": 350,
+    },
+    "3": {
+        "name": "Жёлтый талисман",
+        "description": "Маленький талисман удачи.",
+        "currency": HOPIKI,
+        "price": 150,
+    },
+    "4": {
+        "name": "Золотой билетик",
+        "description": "Коллекционный билет без реальной ценности.",
+        "currency": HOPIKI,
+        "price": 500,
+    },
 }
 
 
@@ -212,8 +243,8 @@ def get_player(player_id: str, name: str = "Игрок") -> dict[str, Any]:
         PLAYERS[player_id] = {
             "id": player_id,
             "name": name,
-            "tomiki": 1000,
-            "hopiki": 1000,
+            TOMIKI: DEFAULT_TOMIKI_BALANCE,
+            HOPIKI: DEFAULT_HOPIKI_BALANCE,
             "items": [],
             "bet_history": [],
             "created_at": now_iso(),
@@ -221,6 +252,10 @@ def get_player(player_id: str, name: str = "Игрок") -> dict[str, Any]:
         save_players()
     else:
         PLAYERS[player_id]["name"] = name
+        PLAYERS[player_id].setdefault(TOMIKI, DEFAULT_TOMIKI_BALANCE)
+        PLAYERS[player_id].setdefault(HOPIKI, DEFAULT_HOPIKI_BALANCE)
+        PLAYERS[player_id].setdefault("items", [])
+        PLAYERS[player_id].setdefault("bet_history", [])
     return PLAYERS[player_id]
 
 
@@ -387,6 +422,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "/dice 6 tomiki 100\n"
             "/slots hopiki 50\n"
             "/roulette красное tomiki 100\n\n"
+            "Магазин:\n"
+            "/shop\n"
+            "/buy_item 1\n"
+            "/inventory\n\n"
             "События:\n"
             "/events\n"
             "/bet_event 1 2 tomiki 100\n\n"
@@ -416,6 +455,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Баланс и история:\n"
         "/balance\n"
         "/bet_history\n\n"
+        "Магазин безделушек:\n"
+        "/shop\n"
+        "/buy_item 1\n"
+        "/inventory\n\n"
         "Играть одному:\n"
         "/dice 6 tomiki 100\n"
         "/dice больше hopiki 50\n"
@@ -1442,6 +1485,81 @@ async def bet_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    get_player(user_id(update), display_name(update))
+    await update.effective_message.reply_text(shop_text())
+
+
+def shop_text() -> str:
+    lines = ["🛍 Магазин безделушек:"]
+    for item_id, item in SHOP_ITEMS.items():
+        lines.append(
+            f"\n{item_id}. {item['name']}\n"
+            f"{item['description']}\n"
+            f"Цена: {item['price']} {currency_title(item['currency'])}\n"
+            f"Купить: /buy_item {item_id}"
+        )
+    return "\n".join(lines)
+
+
+async def buy_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    player_id = user_id(update)
+    player = get_player(player_id, display_name(update))
+    if not context.args:
+        await update.effective_message.reply_text("Формат: /buy_item item_id\nПосмотреть предметы: /shop")
+        return
+
+    item_id = context.args[0]
+    item = SHOP_ITEMS.get(item_id)
+    if item is None:
+        await update.effective_message.reply_text("Такого предмета нет. Посмотри список: /shop")
+        return
+
+    currency = item["currency"]
+    price = item["price"]
+    if not can_pay(player, currency, price):
+        await update.effective_message.reply_text(
+            f"Не хватает валюты. Нужно {price} {currency_title(currency)}."
+        )
+        return
+
+    player[currency] -= price
+    player.setdefault("items", []).append(
+        {
+            "item_id": item_id,
+            "name": item["name"],
+            "description": item["description"],
+            "currency": currency,
+            "price": price,
+            "bought_at": now_iso(),
+        }
+    )
+    save_players()
+
+    await update.effective_message.reply_text(
+        f"Покупка готова!\n"
+        f"Предмет: {item['name']}\n"
+        f"Списано: {price} {currency_title(currency)}\n"
+        f"Баланс: {player[currency]} {currency_title(currency)}"
+    )
+
+
+async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    player = get_player(user_id(update), display_name(update))
+    items = player.get("items", [])
+    if not items:
+        await update.effective_message.reply_text("Инвентарь пустой. Посмотри безделушки в /shop.")
+        return
+
+    lines = ["🎒 Инвентарь:"]
+    for index, item in enumerate(items[-20:], start=1):
+        if isinstance(item, dict):
+            lines.append(f"{index}. {item.get('name', 'Предмет')}")
+        else:
+            lines.append(f"{index}. {item}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def give_tomiki(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await give_currency(update, context, TOMIKI)
 
@@ -1500,6 +1618,108 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("Эта команда доступна только админу.")
         return
     await update.effective_message.reply_text(stats_text())
+
+
+async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_group_chat(update) or update.effective_message is None:
+        return
+
+    raw_text = update.effective_message.text or ""
+    text = raw_text.strip().lower()
+    if not text:
+        return
+
+    get_player(user_id(update), display_name(update))
+
+    if text in {"помощь", "команды", "help", "меню"}:
+        await help_command(update, context)
+        return
+    if text in {"баланс", "мой баланс", "профиль", "balance"}:
+        await balance(update, context)
+        return
+    if text in {"история", "история ставок"}:
+        await bet_history(update, context)
+        return
+    if text in {"магазин", "shop"}:
+        await shop(update, context)
+        return
+    if text in {"инвентарь", "мои предметы", "inventory"}:
+        await inventory(update, context)
+        return
+    if text in {"комнаты", "rooms"}:
+        await rooms(update, context)
+        return
+    if text in {"события", "events"}:
+        await events(update, context)
+        return
+
+    parts = text.split()
+    command = parts[0]
+
+    if command in {"кубик", "dice"}:
+        await handle_group_dice_text(update, parts)
+        return
+    if command in {"слоты", "slots"}:
+        await handle_group_slots_text(update, parts)
+        return
+    if command in {"рулетка", "roulette"}:
+        await handle_group_roulette_text(update, parts)
+        return
+    if command in {"купить", "buy"}:
+        await handle_group_buy_text(update, context, parts)
+
+
+async def handle_group_dice_text(update: Update, parts: list[str]) -> None:
+    if len(parts) != 4:
+        await update.effective_message.reply_text("Формат: кубик 6 tomiki 100")
+        return
+    dice_bet = parse_dice_bet(parts[1])
+    currency = parse_currency(parts[2])
+    try:
+        amount = int(parts[3])
+    except ValueError:
+        await update.effective_message.reply_text("Ставка должна быть числом.")
+        return
+    await play_solo_game(update, "dice", currency, amount, dice_bet=dice_bet)
+
+
+async def handle_group_slots_text(update: Update, parts: list[str]) -> None:
+    if len(parts) != 3:
+        await update.effective_message.reply_text("Формат: слоты tomiki 100")
+        return
+    currency = parse_currency(parts[1])
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await update.effective_message.reply_text("Ставка должна быть числом.")
+        return
+    await play_solo_game(update, "slots", currency, amount)
+
+
+async def handle_group_roulette_text(update: Update, parts: list[str]) -> None:
+    if len(parts) != 4:
+        await update.effective_message.reply_text("Формат: рулетка красное tomiki 100")
+        return
+    roulette_choice = parse_roulette_choice(parts[1])
+    currency = parse_currency(parts[2])
+    try:
+        amount = int(parts[3])
+    except ValueError:
+        await update.effective_message.reply_text("Ставка должна быть числом.")
+        return
+    await play_solo_game(update, "roulette", currency, amount, roulette_choice)
+
+
+async def handle_group_buy_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    parts: list[str],
+) -> None:
+    if len(parts) != 2:
+        await update.effective_message.reply_text("Формат: купить 1")
+        return
+    context.args = [parts[1]]
+    await buy_item(update, context)
 
 
 def stats_text() -> str:
@@ -1670,11 +1890,15 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("event", event_detail))
     application.add_handler(CommandHandler("bet_event", bet_event))
     application.add_handler(CommandHandler("bet_history", bet_history))
+    application.add_handler(CommandHandler("shop", shop))
+    application.add_handler(CommandHandler("buy_item", buy_item))
+    application.add_handler(CommandHandler("inventory", inventory))
     application.add_handler(CommandHandler("give_tomiki", give_tomiki))
     application.add_handler(CommandHandler("give_hopiki", give_hopiki))
     application.add_handler(CommandHandler("give_item", give_item))
     application.add_handler(CommandHandler("admin_stats", admin_stats))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
     return application
 
 
