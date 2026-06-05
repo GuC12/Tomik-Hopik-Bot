@@ -108,30 +108,80 @@ DICE_BET_TITLES = {
     "odd": "нечёт",
 }
 
+# Магазин безделушек.
+# Чтобы добавить свой предмет, просто допиши новый блок по примеру:
+# "9": {
+#     "emoji": "🎁",
+#     "name": "Название предмета",
+#     "description": "Короткое описание",
+#     "rarity": "обычный",
+#     "currency": TOMIKI,
+#     "price": 100,
+# },
 SHOP_ITEMS: dict[str, dict[str, Any]] = {
     "1": {
+        "emoji": "💎",
         "name": "Блестящий камушек",
         "description": "Просто красивый сувенир для профиля.",
+        "rarity": "обычный",
         "currency": TOMIKI,
         "price": 100,
     },
     "2": {
+        "emoji": "👑",
         "name": "Мини-корона",
         "description": "Безделушка для тех, кто любит побеждать красиво.",
+        "rarity": "редкий",
         "currency": TOMIKI,
         "price": 350,
     },
     "3": {
+        "emoji": "🟨",
         "name": "Жёлтый талисман",
         "description": "Маленький талисман удачи.",
+        "rarity": "обычный",
         "currency": HOPIKI,
         "price": 150,
     },
     "4": {
+        "emoji": "🎟",
         "name": "Золотой билетик",
         "description": "Коллекционный билет без реальной ценности.",
+        "rarity": "редкий",
         "currency": HOPIKI,
         "price": 500,
+    },
+    "5": {
+        "emoji": "🧸",
+        "name": "Плюшевый Томик",
+        "description": "Мягкая безделушка, которая просто лежит в инвентаре.",
+        "rarity": "милый",
+        "currency": TOMIKI,
+        "price": 250,
+    },
+    "6": {
+        "emoji": "🎲",
+        "name": "Счастливый кубик",
+        "description": "Коллекционный кубик. На шанс игр не влияет.",
+        "rarity": "редкий",
+        "currency": TOMIKI,
+        "price": 600,
+    },
+    "7": {
+        "emoji": "🌟",
+        "name": "Звёздная наклейка",
+        "description": "Наклейка для настроения и красивого инвентаря.",
+        "rarity": "обычный",
+        "currency": HOPIKI,
+        "price": 220,
+    },
+    "8": {
+        "emoji": "🪄",
+        "name": "Игрушечная палочка",
+        "description": "Магии нет, зато выглядит важно.",
+        "rarity": "эпический",
+        "currency": HOPIKI,
+        "price": 900,
     },
 }
 
@@ -1491,11 +1541,15 @@ async def shop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def shop_text() -> str:
-    lines = ["🛍 Магазин безделушек:"]
+    lines = [
+        "🛍 Магазин безделушек",
+        "Все предметы декоративные и не дают преимущества в играх.",
+    ]
     for item_id, item in SHOP_ITEMS.items():
         lines.append(
-            f"\n{item_id}. {item['name']}\n"
+            f"\n{item_id}. {item.get('emoji', '🎁')} {item['name']}\n"
             f"{item['description']}\n"
+            f"Редкость: {item.get('rarity', 'обычный')}\n"
             f"Цена: {item['price']} {currency_title(item['currency'])}\n"
             f"Купить: /buy_item {item_id}"
         )
@@ -1527,8 +1581,10 @@ async def buy_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player.setdefault("items", []).append(
         {
             "item_id": item_id,
+            "emoji": item.get("emoji", "🎁"),
             "name": item["name"],
             "description": item["description"],
+            "rarity": item.get("rarity", "обычный"),
             "currency": currency,
             "price": price,
             "bought_at": now_iso(),
@@ -1538,7 +1594,8 @@ async def buy_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.effective_message.reply_text(
         f"Покупка готова!\n"
-        f"Предмет: {item['name']}\n"
+        f"Предмет: {item.get('emoji', '🎁')} {item['name']}\n"
+        f"Редкость: {item.get('rarity', 'обычный')}\n"
         f"Списано: {price} {currency_title(currency)}\n"
         f"Баланс: {player[currency]} {currency_title(currency)}"
     )
@@ -1554,7 +1611,11 @@ async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = ["🎒 Инвентарь:"]
     for index, item in enumerate(items[-20:], start=1):
         if isinstance(item, dict):
-            lines.append(f"{index}. {item.get('name', 'Предмет')}")
+            lines.append(
+                f"{index}. {item.get('emoji', '🎁')} {item.get('name', 'Предмет')}\n"
+                f"   Редкость: {item.get('rarity', 'обычный')}\n"
+                f"   Куплено: {item.get('bought_at', 'неизвестно')}"
+            )
         else:
             lines.append(f"{index}. {item}")
     await update.effective_message.reply_text("\n".join(lines))
